@@ -1,0 +1,84 @@
+name: hob-dispatch
+x-app: &app
+  build: ./backend
+  environment:
+    DB_HOST: db
+    DB_NAME: ${DB_NAME:-hobs}
+    DB_USER: ${DB_USER:-hobs}
+    DB_PASSWORD: ${DB_PASSWORD:-hobs-dev}
+    JWT_SECRET: ${JWT_SECRET:-hob-dispatch-development-only-change-me}
+    SEED_DEMO: ${SEED_DEMO:-true}
+    REDIS_URL: redis://redis:6379/0
+  volumes:
+    - runtime:/runtime
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-hob-dispatch}-db
+    environment:
+      POSTGRES_DB: ${DB_NAME:-hobs}
+      POSTGRES_USER: ${DB_USER:-hobs}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-hobs-dev}
+    ports: ['127.0.0.1:${DB_PORT:-17782}:5432']
+    volumes: [pg-data:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -h 127.0.0.1 -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  redis:
+    image: redis:7-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-hob-dispatch}-redis
+    command: [redis-server, --appendonly, 'yes']
+    volumes: [redis-data:/data]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  backend:
+    <<: *app
+    container_name: ${COMPOSE_PROJECT_NAME:-hob-dispatch}-backend
+    command: [sh, scripts/start.sh]
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    ports: ['127.0.0.1:${BACKEND_PORT:-19282}:8000']
+    healthcheck:
+      test: [CMD, python, -c, 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8000/health", timeout=2)']
+      interval: 3s
+      timeout: 3s
+      retries: 25
+  worker:
+    <<: *app
+    container_name: ${COMPOSE_PROJECT_NAME:-hob-dispatch}-worker
+    command: [python, -m, src.worker]
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      backend: {condition: service_healthy}
+    healthcheck:
+      test: [CMD, python, -c, 'import sys,time; from pathlib import Path; sys.exit(time.time()-Path("/runtime/worker.beat").stat().st_mtime>15)']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  frontend:
+    build: ./frontend
+    container_name: ${COMPOSE_PROJECT_NAME:-hob-dispatch}-frontend
+    depends_on:
+      backend: {condition: service_healthy}
+    ports: ['127.0.0.1:${FRONTEND_PORT:-18282}:80']
+    healthcheck:
+      test: [CMD, wget, -qO, /dev/null, 'http://127.0.0.1/api/health']
+      interval: 3s
+      timeout: 3s
+      retries: 20
+volumes:
+  pg-data:
+  redis-data:
+  runtime:
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: ${NETWORK_SUBNET:-10.221.213.0/24}
