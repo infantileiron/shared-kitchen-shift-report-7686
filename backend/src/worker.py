@@ -8,6 +8,7 @@ from threading import Event
 
 from src.config.settings import WORKER_METRICS
 from src.models.db import cache
+from src.services.recompute import recompute_one
 from src.services.scheduler import dispatch_one
 
 
@@ -26,9 +27,12 @@ def main():
     while not stop.is_set():
         try:
             for _ in range(64):
-                if stop.is_set() or not dispatch_one():
+                if stop.is_set():
                     break
-                processed += 1
+                if dispatch_one() or recompute_one():
+                    processed += 1
+                    continue
+                break
             stamp = datetime.now(timezone.utc).isoformat()
             cache.set(WORKER_METRICS, json.dumps({'checked_at': stamp, 'processed_since_start': processed}), ex=15)
             beat.touch()

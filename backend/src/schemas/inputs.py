@@ -37,3 +37,8 @@ class ReadingInput(Input):
     sampled_at: AwareDatetime
     gas_m3: Annotated[Decimal, Field(ge=0, max_digits=10, decimal_places=3)]
     burner_minutes: Annotated[int, Field(ge=0, le=180)]
+
+
+class BackfillInput(Input):
+    source_version: Annotated[int, Field(ge=1, le=1000000)]
+    readings: Annotated[list[ReadingInput], Field(min_length=1, max_length=64)]

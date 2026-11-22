@@ -1,16 +1,35 @@
 import {api} from '../api/client.js';
 import {instrument} from '../components/common/instrument.js';
 import {badge, empty, options, pageHead, table} from '../components/common/views.js';
-import {DeliveryKinds, Mailboxes, Outcomes, ShiftKinds, States} from '../constants/enums.js';
+import {DeliveryKinds, Mailboxes, Outcomes, Reasons, ShiftKinds, States} from '../constants/enums.js';
 import {download} from '../hooks/events.js';
 import {state} from '../stores/state.js';
 import {h, number, time} from '../utils/format.js';
 
+function reason(row) {
+  const detail = row.detail || {};
+  const streak = detail.longest_streak ? `最长连超 ${detail.longest_streak.old} → ${detail.longest_streak.new} 格（门槛 ${detail.consecutive} 格）` : '';
+  const boundary = detail.cooldown_until ? `冷却边界 ${time(detail.cooldown_until.old)} → ${time(detail.cooldown_until.new)}` : '';
+  return `${h(Reasons[row.reason])}<small class="cell-sub">${h(row.reason === 'readings_backfilled' ? streak : boundary)}</small>`;
+}
+
 export async function inbox(render) {
-  const messages = await api.inbox(state.mailbox);
+  const [messages, reminder] = await Promise.all([api.inbox(state.mailbox), api.revisions(state.mailbox)]);
   state.inbox = messages;
   const filters = `<div class="mailbox-field"><label for="mailbox">收件箱</label><select id="mailbox">${options({'':'全部收件箱', ...Mailboxes})}</select></div>`;
+  const changes = reminder.revisions;
+  const notes = `${reminder.pending ? `<p class="form-note">补录重算进行中 ${reminder.pending} 项，算齐后在此展示提醒变化与原因。</p>` : ''}
+    ${reminder.failed ? `<p class="form-note">${reminder.failed} 项重算未成功，可按原来源版本重新补录。</p>` : ''}`;
+  const panel = (changes.length || reminder.pending || reminder.failed) ? `<section class="panel"><div class="panel-head"><div><h2>提醒变化</h2><p>补录已发班报后，按各班原规则和计划时刻重算并顺推冷却的结果，原回执不变。</p></div><span class="index">${changes.length} 项</span></div>
+    ${notes}
+    ${changes.length ? table(['班次','原判定','重算判定','原因','来源版本','算齐（上海）'], changes.map(row => [
+      `<strong>${h(row.shift_code)}</strong><small class="cell-sub">${h(row.station_label)} · ${h(ShiftKinds[row.shift_kind])} · V${row.rule_version}</small>`,
+      badge(Outcomes[row.previous_outcome], row.previous_outcome === 'alerted' ? 'warm' : 'muted'),
+      badge(Outcomes[row.revised_outcome], row.revised_outcome === 'alerted' ? 'warm' : 'muted'),
+      reason(row), `<span class="mono">V${row.source_version}</span>`, `<span class="mono">${time(row.finished_at, true)}</span>`,
+    ])) : ''}</section>` : '';
   if (!render(`${pageHead('04 / 回执归档', '模拟收件箱', '查看已送达的班报和偏差提醒，按收件箱核对投递证据。', '<button id="refresh" class="neutral">刷新收件箱</button>')}
+    ${panel}
     <section class="panel mail-list"><div class="panel-head"><div><h2>投递回执</h2><p>${messages.length} 条消息</p></div>${filters}</div>
     ${messages.length ? table(['主题','判定','收件箱','实际投递（上海）','回执'], messages.map(row => [
       `<a href="#/inbox/${row.id}"><strong>${h(row.station_label)} · ${h(DeliveryKinds[row.kind])}</strong></a><small class="cell-sub mono">${h(row.shift_code)} · ${h(ShiftKinds[row.shift_kind])} · V${row.rule_version}</small>`,

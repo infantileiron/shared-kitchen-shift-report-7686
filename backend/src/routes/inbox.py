@@ -29,6 +29,12 @@ def get_inbox(mailbox: Mailbox | None = None):
         return payload(inbox.messages(db, mailbox))
 
 
+@router.get('/reminder-revisions')
+def get_revisions(mailbox: Mailbox | None = None):
+    with connect() as db:
+        return payload(inbox.revisions(db, mailbox))
+
+
 @router.get('/inbox/{receipt_id}')
 def get_receipt(receipt_id: int):
     with connect() as db:

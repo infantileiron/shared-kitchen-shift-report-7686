@@ -3,12 +3,21 @@ from io import StringIO
 
 from fastapi import HTTPException
 
-from src.models.queries import INBOX_VIEW, SHIFT_VIEW
+from src.models.queries import INBOX_VIEW, REVISION_VIEW, SHIFT_VIEW
 
 
 def queue(db):
     return db.execute(SHIFT_VIEW + ' ORDER BY (s.evaluated_at IS NOT NULL), '
                       'CASE WHEN s.evaluated_at IS NULL THEN s.due_at END, s.due_at DESC,s.id DESC').fetchall()
+
+
+def revisions(db, mailbox=None):
+    rows = db.execute(REVISION_VIEW + ' AND (%s::text IS NULL OR r.mailbox=%s) ORDER BY j.finished_at DESC,rv.id DESC',
+                      (mailbox, mailbox)).fetchall()
+    counts = db.execute("""SELECT count(*) FILTER (WHERE status='pending') AS pending,
+                                  count(*) FILTER (WHERE status='failed') AS failed
+                           FROM recompute_jobs""").fetchone()
+    return {'pending': counts['pending'], 'failed': counts['failed'], 'revisions': rows}
 
 
 def messages(db, mailbox=None):

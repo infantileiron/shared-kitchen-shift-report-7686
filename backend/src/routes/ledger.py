@@ -3,7 +3,7 @@ from fastapi import APIRouter, Depends
 from src.constants.enums import Role
 from src.controllers.session import account, allows
 from src.models.db import connect
-from src.schemas.inputs import ReadingInput, RuleInput, ShiftInput
+from src.schemas.inputs import BackfillInput, ReadingInput, RuleInput, ShiftInput
 from src.services import ledger
 from src.utils.encoding import payload
 
@@ -52,3 +52,9 @@ def get_shift(shift_id: int):
 def record(shift_id: int, body: ReadingInput, actor=Depends(writer)):
     with connect() as db:
         return payload(ledger.new_reading(db, actor, shift_id, body))
+
+
+@router.post('/shifts/{shift_id}/backfill', status_code=201)
+def backfill(shift_id: int, body: BackfillInput, actor=Depends(writer)):
+    with connect() as db:
+        return payload(ledger.backfill(db, actor, shift_id, body))

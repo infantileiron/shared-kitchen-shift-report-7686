@@ -24,4 +24,9 @@ class Outcome(StrEnum):
     UNMEASURABLE = 'unmeasurable'
 
 
+class Reason(StrEnum):
+    READINGS_BACKFILLED = 'readings_backfilled'
+    COOLDOWN_BOUNDARY = 'cooldown_boundary'
+
+
 SLOT_MINUTES = 15

@@ -21,8 +21,10 @@ export async function ledger(render, preferred) {
     row.outcome ? badge(Outcomes[row.outcome], row.outcome === 'alerted' ? 'warm' : 'muted') : badge('待投递', 'live'),
   ]);
   const editable = writes && current && !current.evaluated_at && Date.parse(current.due_at) > Date.now();
-  const readingTable = detail?.readings.length ? table(['时格起点', '用气量 m³', '炉分钟'], detail.readings.map(row => [
+  const backfillable = writes && current?.evaluated_at;
+  const readingTable = detail?.readings.length ? table(['时格起点', '用气量 m³', '炉分钟', '来源'], detail.readings.map(row => [
     `<span class="mono">${time(row.sampled_at)}</span>`, number(row.gas_m3), row.burner_minutes,
+    row.source_version > 0 ? badge(`补录 V${row.source_version}`, 'live') : '原始登记',
   ])) : empty('尚无读数', '时格结束后可录入气量和炉分钟。');
   const stationOptions = options(Object.fromEntries(stations.map(s => [s.id, `${s.code} · ${s.label}`])));
   const station = stations.find(s => s.id === current?.station_id);
@@ -44,11 +46,18 @@ export async function ledger(render, preferred) {
     ${field('用气量（m³）', '<input type="number" name="gas_m3" min="0" max="9999999" step="0.001" required>')}
     ${field('炉分钟', '<input type="number" name="burner_minutes" min="0" max="180" step="1" required>')}
     <button class="primary" type="submit">记入用气账</button>${formStatus()}</form>` : '';
+  const backfill = backfillable ? `<p class="form-note">班报已发出，可补录读数：同一时格以来源版本为准，算齐后在收件箱展示提醒变化与原因。</p>
+    <form id="backfill-form" class="grid-form reading-form">
+    ${field('来源版本', '<input type="number" name="source_version" min="1" max="1000000" step="1" placeholder="1" required>')}
+    ${field('时格起点（上海）', `<input type="datetime-local" name="sampled_at" value="${h(shanghaiInput(current.starts_at))}" required>`)}
+    ${field('用气量（m³）', '<input type="number" name="gas_m3" min="0" max="9999999" step="0.001" required>')}
+    ${field('炉分钟', '<input type="number" name="burner_minutes" min="0" max="180" step="1" required>')}
+    <button class="primary" type="submit">补录并重算</button>${formStatus()}</form>` : '';
   if (!render(`${pageHead('01 / 用气交接', '灶台用气账', '按 15 分钟时格登记表差和炉分钟，交接时查看已冻结的班报。', writes ? '<button id="start-shift" class="primary">＋ 登记班次</button>' : '')}
     <section class="strip"><div><label>纳入巡查</label><strong>${stations.length}<small> 台灶</small></strong></div><div><label>计划投递</label><strong>${active}<small> 个班次</small></strong></div><div><label>最近偏差提醒</label><strong class="strip-code">${frozen ? h(frozen.code) : '暂无'}</strong></div></section>
     <div class="split"><div class="stack"><section class="panel"><div class="panel-head"><div><h2>班次台账</h2><p>点击班次编号查看该班的读数与规则。</p></div><span class="index">${shifts.length} 班</span></div>
     ${rows.length ? table(['班次编号','灶台','班别','收档','读数','判定'], rows) : empty('尚无班次','发布对应班别规则后登记一个班次。')}</section>${create}
-    ${detail ? `<section class="panel" id="readings"><div class="panel-head"><div><h2>测量时格</h2><p class="mono">${h(current.code)} · ${time(current.starts_at)} → ${time(current.ends_at)}</p></div>${current.evaluated_at ? badge('已冻结') : ''}</div>${readingTable}${entry}</section>` : ''}</div>${summary}</div>`)) return;
+    ${detail ? `<section class="panel" id="readings"><div class="panel-head"><div><h2>测量时格</h2><p class="mono">${h(current.code)} · ${time(current.starts_at)} → ${time(current.ends_at)}</p></div>${current.evaluated_at ? badge('已冻结') : ''}</div>${readingTable}${entry}${backfill}</section>` : ''}</div>${summary}</div>`)) return;
   document.querySelectorAll('[data-shift]').forEach(button => button.onclick = () => { location.hash = `/ledger/${button.dataset.shift}`; });
   document.querySelector('#start-shift')?.addEventListener('click', () => {
     const form = document.querySelector('#create-shift'); form.open = true; form.scrollIntoView({block:'center'}); form.querySelector('input').focus();
@@ -59,6 +68,13 @@ export async function ledger(render, preferred) {
   });
   bindForm(document.querySelector('#reading-form'), async data => {
     await api.reading(current.id, {sampled_at: toStamp(data.sampled_at), gas_m3: data.gas_m3, burner_minutes: Number(data.burner_minutes)});
+    await ledger(render, current.id);
+    document.querySelector('#readings')?.scrollIntoView({block:'nearest'});
+  });
+  bindForm(document.querySelector('#backfill-form'), async data => {
+    const result = await api.backfill(current.id, {source_version: Number(data.source_version),
+      readings: [{sampled_at: toStamp(data.sampled_at), gas_m3: data.gas_m3, burner_minutes: Number(data.burner_minutes)}]});
+    if (result.slots.every(slot => !slot.applied)) throw new Error('该时格已有相同或更高来源版本的读数，未覆盖。');
     await ledger(render, current.id);
     document.querySelector('#readings')?.scrollIntoView({block:'nearest'});
   });

@@ -71,6 +71,18 @@ def new_shift(db, actor, body):
     return shift
 
 
+def check_slot(shift, now, sampled_at, gas_m3, burner_minutes):
+    offset = sampled_at - shift['starts_at']
+    if offset < timedelta(0) or sampled_at >= shift['ends_at'] or offset % timedelta(minutes=SLOT_MINUTES):
+        raise HTTPException(422, '读数时间须为班次内从开班起每 15 分钟的刻度')
+    slot_end = min(shift['ends_at'], sampled_at + timedelta(minutes=SLOT_MINUTES))
+    if slot_end > now:
+        raise HTTPException(422, '该测量时格尚未结束')
+    max_minutes = int((slot_end - sampled_at).total_seconds() * shift['burner_count'] // 60)
+    if burner_minutes > max_minutes or (burner_minutes == 0 and gas_m3 > 0):
+        raise HTTPException(422, '炉分钟须在灶眼与时格容量内，零炉分钟只允许零用气')
+
+
 def new_reading(db, actor, shift_id, body):
     shift = db.execute('''SELECT s.*, st.burner_count FROM shifts s JOIN stations st ON st.id=s.station_id
                           WHERE s.id=%s FOR UPDATE OF s''', (shift_id,)).fetchone()
@@ -79,15 +91,7 @@ def new_reading(db, actor, shift_id, body):
     now = db.execute('SELECT clock_timestamp() AS now').fetchone()['now']
     if shift['evaluated_at'] or now >= shift['due_at']:
         raise HTTPException(409, '已到计划投递时间，班次用气账已冻结')
-    offset = body.sampled_at - shift['starts_at']
-    if offset < timedelta(0) or body.sampled_at >= shift['ends_at'] or offset % timedelta(minutes=SLOT_MINUTES):
-        raise HTTPException(422, '读数时间须为班次内从开班起每 15 分钟的刻度')
-    slot_end = min(shift['ends_at'], body.sampled_at + timedelta(minutes=SLOT_MINUTES))
-    if slot_end > now:
-        raise HTTPException(422, '该测量时格尚未结束')
-    max_minutes = int((slot_end - body.sampled_at).total_seconds() * shift['burner_count'] // 60)
-    if body.burner_minutes > max_minutes or (body.burner_minutes == 0 and body.gas_m3 > 0):
-        raise HTTPException(422, '炉分钟须在灶眼与时格容量内，零炉分钟只允许零用气')
+    check_slot(shift, now, body.sampled_at, body.gas_m3, body.burner_minutes)
     reading = db.execute('''INSERT INTO readings (shift_id,sampled_at,gas_m3,burner_minutes,recorded_by)
                             VALUES (%s,%s,%s,%s,%s) ON CONFLICT (shift_id,sampled_at) DO NOTHING RETURNING *''',
                          (shift_id, body.sampled_at, body.gas_m3, body.burner_minutes, actor['id'])).fetchone()
@@ -95,3 +99,41 @@ def new_reading(db, actor, shift_id, body):
         raise HTTPException(409, '同一班次的测量时格已登记')
     audit(db, actor['email'], 'reading.recorded', reading['id'])
     return reading
+
+
+def backfill(db, actor, shift_id, body):
+    shift = db.execute('''SELECT s.*, st.burner_count FROM shifts s JOIN stations st ON st.id=s.station_id
+                          WHERE s.id=%s FOR UPDATE OF s''', (shift_id,)).fetchone()
+    if shift is None:
+        raise HTTPException(404, '班次不存在')
+    if not shift['evaluated_at']:
+        raise HTTPException(409, '班次尚未投递，请直接登记读数')
+    now = db.execute('SELECT clock_timestamp() AS now').fetchone()['now']
+    slots = []
+    for entry in body.readings:
+        check_slot(shift, now, entry.sampled_at, entry.gas_m3, entry.burner_minutes)
+        # Concurrent backfills of the same slot resolve by source version: only a strictly
+        # newer version replaces the stored reading, so stale batches never overwrite fresh ones.
+        applied = db.execute('''INSERT INTO readings (shift_id,sampled_at,gas_m3,burner_minutes,recorded_by,source_version)
+                                VALUES (%s,%s,%s,%s,%s,%s)
+                                ON CONFLICT (shift_id,sampled_at) DO UPDATE SET
+                                  gas_m3=excluded.gas_m3, burner_minutes=excluded.burner_minutes,
+                                  recorded_by=excluded.recorded_by, recorded_at=clock_timestamp(),
+                                  source_version=excluded.source_version
+                                WHERE readings.source_version < excluded.source_version
+                                RETURNING id''',
+                             (shift_id, entry.sampled_at, entry.gas_m3, entry.burner_minutes,
+                              actor['id'], body.source_version)).fetchone()
+        slots.append({'sampled_at': entry.sampled_at, 'applied': applied is not None})
+    # One job per (shift, source version): retrying the same batch stays idempotent, while a
+    # failed job is re-queued in place so a retry never leaves duplicate records behind.
+    job = db.execute('''INSERT INTO recompute_jobs (shift_id,source_version,created_by) VALUES (%s,%s,%s)
+                        ON CONFLICT (shift_id,source_version) DO UPDATE SET status='pending', attempts=0
+                        WHERE recompute_jobs.status='failed' RETURNING *''',
+                     (shift_id, body.source_version, actor['id'])).fetchone()
+    if job is None:
+        job = db.execute('SELECT * FROM recompute_jobs WHERE shift_id=%s AND source_version=%s',
+                         (shift_id, body.source_version)).fetchone()
+    else:
+        audit(db, actor['email'], 'backfill.recorded', job['id'])
+    return {'job': job, 'slots': slots}
